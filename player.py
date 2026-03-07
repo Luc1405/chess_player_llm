@@ -1,7 +1,8 @@
 import math
 import torch
 import chess
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from peft import PeftModel
 
 from chess_tournament import Player, validate_player
 
@@ -20,8 +21,9 @@ class TransformerPlayer(Player):
 
     def __init__(
         self,
-        name: str = "Transformer-Qwen2.5-1.5B",
-        model_name: str = "Qwen/Qwen2.5-1.5B-Instruct",
+        name: str = "Transformer-MrChess",
+        adapter_repo: str = "Luc1405/MrChess",
+        base_model_name: str = "Qwen/Qwen2.5-1.5B-Instruct",
         device: str | None = None,
         pretopk: int = 80,
         topk: int = 32,
@@ -30,6 +32,7 @@ class TransformerPlayer(Player):
         use_heuristics: bool = True,
         heuristic_blend: float = 0.15,
         use_chat_template: bool = True,
+        load_in_4bit: bool = True,
         load_in_8bit: bool = False,
         blunder_filter: bool = True,
         max_opponent_replies: int = 16,
@@ -37,7 +40,8 @@ class TransformerPlayer(Player):
     ):
         super().__init__(name)
 
-        self.model_name = model_name
+        self.adapter_repo = adapter_repo
+        self.base_model_name = base_model_name
         self.pretopk = int(pretopk)
         self.topk = int(topk)
 
@@ -56,30 +60,51 @@ class TransformerPlayer(Player):
         self.device = device
 
         torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
+        # Load tokenizer from the adapter repo
         self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
+            adapter_repo,
             use_fast=True,
             trust_remote_code=False,
         )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
+        # Load base model, then attach PEFT adapter
         if self.device == "cuda":
-            if load_in_8bit:
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    model_name,
-                    device_map="auto",
+            quantization_config = None
+
+            if load_in_4bit:
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,
+                )
+            elif load_in_8bit:
+                quantization_config = BitsAndBytesConfig(
                     load_in_8bit=True,
                 )
-            else:
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    model_name,
-                    torch_dtype=torch.float16,
+
+            if quantization_config is not None:
+                base_model = AutoModelForCausalLM.from_pretrained(
+                    base_model_name,
                     device_map="auto",
+                    quantization_config=quantization_config,
+                    torch_dtype=torch.float16,
+                )
+            else:
+                base_model = AutoModelForCausalLM.from_pretrained(
+                    base_model_name,
+                    device_map="auto",
+                    torch_dtype=torch.float16,
                 )
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(model_name).to(self.device)
+            base_model = AutoModelForCausalLM.from_pretrained(base_model_name).to(self.device)
+
+        self.model = PeftModel.from_pretrained(base_model, adapter_repo)
 
         try:
             self.model.config.use_cache = False
@@ -491,3 +516,6 @@ class TransformerPlayer(Player):
             return None
 
         return best_uci
+
+
+validate_player(TransformerPlayer())
