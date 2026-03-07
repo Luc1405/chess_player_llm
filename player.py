@@ -516,6 +516,3 @@ class TransformerPlayer(Player):
             return None
 
         return best_uci
-
-
-validate_player(TransformerPlayer())
